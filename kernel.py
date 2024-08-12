@@ -2,10 +2,10 @@
 import ast
 import ctypes
 import os
-import sys
 import msvcrt
 from time import strftime, gmtime, time
-
+from klib.sharedlibs.user import User, Administrator, Dummy, UserGroup
+from klib import kproperties
 from klib import kcolor
 from klib import kcrypto
 from klib import commandparser
@@ -15,9 +15,12 @@ KERNEL32 = ctypes.WinDLL("kernel32")
 CRYPTO = kcrypto.Crypto
 CPARSER = commandparser
 LOGTIME = strftime("%Y_%m_%d-%H%M%S", gmtime(time()))
+GROUPS = ["Administrator", "Users", "Dummy"]
+GROUPSCLS = [["Administrator", Administrator()], ["Users", UserGroup()], ["Dummy", Dummy()]]
 
 # Define base kernel functions and structs #
 type Number = float | int
+KERNEL_DEFAULT_PASSWORD = "1234"
 
 
 def IsDir(path: str) -> bool:
@@ -70,6 +73,10 @@ class FileSystem:
     def ListDir(dirpath: str) -> list[str]:
         return os.listdir(dirpath)
 
+    @staticmethod
+    def ParseProperties(filename: str) -> dict:
+        with open(filename, "r") as f: data = f.read()
+        return kproperties.parse_properties(data)
 
 class Char:
     def __init__(self, char: str):
@@ -177,7 +184,7 @@ def field_7889_f(var1):
     p_0003_7889f = []
     for b in var1:
         if isinstance(b, str):
-            p_0003_7889f.append("'"+b+"'")
+            p_0003_7889f.append("'" + b + "'")
             continue
         p_0003_7889f.append(b)
     for b, a in enumerate(p_0003_7889f):
@@ -190,6 +197,15 @@ def field_7889_f(var1):
     p_0002_7889f = ast.literal_eval(p_0001_7889f)
     return p_0002_7889f
 
+class usec:
+    @staticmethod
+    def PasswordRead(password: str, user: User) -> bool:
+        if kcrypto.Crypto.salt(user.salt, kcrypto.Crypto.hash("sha256", password.encode())) == user.password:
+            return True
+        else:
+            return False
+
 
 if __name__ == '__main__':
-    field_7889_f([["77", 77], 78, "e9", True])
+    u = User("root", Administrator(), "test1234".encode())
+    print(u.name, u.group, u.created, u.salt, u.password)

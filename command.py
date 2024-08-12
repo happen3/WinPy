@@ -1,19 +1,64 @@
 import pickle
-import shutil
-import zipfile
 import marshal
-
 import kernel
+import klib.db
 from klib import commandparser
 from klib import application
 from klib import pkmgr
+from klib import kcrypto as kcrypto
+from klib.sharedlibs.user import Dummy, User
 import os
+import sys
 import pathlib
 from klib import klog
 
+CPRINT = kernel.stdio.cprint
+
+
+def save(dictdb: dict, path: str):
+    with open(path, "wb") as FH:
+        pickle.dump(dictdb, FH)
+
+
+def FALLBACK_CPRINT(text: str, attributes: list[bool | int]):
+    fake_attributes = attributes
+    print(text)
+
+
+if not sys.stdout.isatty():
+    print("This environnment does not supports colour!\nFallback to FALLBACK_CPRINT will be used.")
+    CPRINT = FALLBACK_CPRINT
+
+UserRegistry = []
+klog.LoggedFile("Finished registering users").log()
 idx: int = 0
 klog.LoggedFile("Starting up command line!").log()
-
+activeusername: None | str = None
+users = []  # At least, if it fails, we'll end up with a defined user array instead of just nothing...
+if not pathlib.Path(".\\users.db").exists():
+    UserRegistry = [kernel.User("root", kernel.Administrator(), kernel.KERNEL_DEFAULT_PASSWORD.encode(), [])]
+    CPRINT(
+        "You are using the default password: '1234'!\nPlease change it the soonest time possible for security reasons."
+        , [0x0c, 0x00, True])
+    users = klib.db.Database("users")
+    for i, user in enumerate(UserRegistry):
+        users[i] = user
+    # write
+    users.save(".\\users.db")
+else:
+    with open(".\\users.db", "rb") as FH:
+        UserRegistry: list | dict = pickle.load(FH)
+        users = UserRegistry
+    for DUser in UserRegistry["users"].values():
+        #print(UserRegistry)
+        DummyUser = kernel.User(DUser.name, Dummy(), kernel.KERNEL_DEFAULT_PASSWORD.encode(), [])
+        DummyUser.salt = DUser.salt
+        DummyUser.regenerate_password()
+        if DUser.password == DummyUser.password:
+            CPRINT(
+                "You are using the default password: '1234'!\nPlease change it the sonnest time possible for security "
+                "reasons."
+                , [0x0c, 0x00, True])
 if not pathlib.Path("path.sys").exists():
     SPATH = [".\\sbin\\"]
     with open("path.sys", "wb") as FH:
@@ -21,7 +66,6 @@ if not pathlib.Path("path.sys").exists():
 else:
     with open("path.sys", 'rb') as FH:
         SPATH = marshal.load(FH)
-CPRINT = kernel.stdio.cprint
 
 import ctypes
 
@@ -77,9 +121,53 @@ def get_drive_number(drive_letter):
     return drive_number
 
 
+def GetUserHandleOfActiveUserName(ActiveUserName: str) -> kernel.User | None:
+    if isinstance(UserRegistry, list):
+        return UserRegistry[0]
+    for ruser in UserRegistry["users"].values():
+        if ruser.name == ActiveUserName:
+            #print(ruser)
+            return ruser
+    return None
+
+
+def SetCurrentUserContext(newUser: kernel.User):
+    global activeusername
+    activeusername = newUser.name
+
+
+def GetHookOfCurrentUser():
+    userhandle = GetUserHandleOfActiveUserName(activeusername)
+    return activeusername, userhandle
+
+
+SetCurrentUserContext(GetUserHandleOfActiveUserName("root"))
+
+
+def GetCurrentUser(ActiveUserName: str):
+    UserHandle = GetUserHandleOfActiveUserName(ActiveUserName)
+    if UserHandle == None:
+        CPRINT("User does not exists or is invalid.", [0x0c, 0x00])
+    return UserHandle
+
+
+def execute_app(filepath: str, userPermissions: list[str], userGroupType: int = 0) -> tuple[str, str] | None:
+    with open(filepath, "rb") as FH:
+        app = pickle.load(FH)
+    for perm in app["_manifest_"]["app_permissions"]:
+        if "*" in userPermissions:
+            break
+        if perm not in userPermissions:
+            return "REJECT", "Not enough permissions for user."
+    if userGroupType < app["_manifest_"]["app_executionLevel"]:
+        return "REJECT", "Group permission level does not permits execution of this app."
+    appcode = marshal.loads(app["_text_"])
+    exec(appcode["code"])
+
+
 CPRINT("## WinPy kernel ##\r", [0x0e, 0x00])
 print()
-while True:
+while __name__ == "__main__":
 
     dev = get_drive_info(os.getcwd()[0])
     ddn = get_drive_number(os.getcwd()[0])
@@ -103,13 +191,25 @@ while True:
             pass
         try:
             if pathlib.Path(f".\\sbin\\{command[0]}.kx").exists():
-                application.execute_app(f".\\sbin\\{command[0]}.kx")
+                UserHandle = GetUserHandleOfActiveUserName(activeusername)
+                if UserHandle is None:
+                    CPRINT("Current user does not exists or is invalid", [0x0c, 0x00])
+                    continue
+                success = application.execute_app(f".\\sbin\\{command[0]}.kx",
+                                                  UserHandle.group.perms + UserHandle.addedperms,
+                                                  UserHandle.group.grouptype)
+                if isinstance(success, list) and success[0] == "REJECT":
+                    CPRINT(f"Permission denied.\nReason: {success[1]}", [0x0c, 0x00])
                 continue
             if pathlib.Path(f".\\sbin\\{command[0]}.kxa").exists():
-                with open(f".\\sbin\\{command[0]}.kxa", "rb") as FH:
-                    app = pickle.load(FH)
-                appcode = marshal.loads(app["_text_"])
-                exec(appcode["code"])
+                UserHandle = GetUserHandleOfActiveUserName(activeusername)
+                if UserHandle is None:
+                    CPRINT("Current user does not exists or is invalid", [0x0c, 0x00])
+                    continue
+                success = execute_app(f".\\sbin\\{command[0]}.kxa", UserHandle.group.perms + UserHandle.addedperms,
+                                      UserHandle.group.grouptype)
+                if isinstance(success, list) and success[0] == "REJECT":
+                    CPRINT(f"Permission denied.\nReason: {success[1]}", [0x0c, 0x00])
                 continue
             if pathlib.Path(f".\\sbin\\{command[0]}.pkg").exists():
                 pkmgr.install_package(f".\\sbin\\{command[0]}.pkg", ".\\sbin")
@@ -122,14 +222,123 @@ while True:
 
         if command[0] == "exit":
             break
+        if command[0] == "getenv":
+            if command[1] == "--List" or command[1] == "-l":
+                CPRINT("Environment variables:", [0x06, 0x00])
+                for k in os.environ:  # Subject to change
+                    w = os.environ[k]  # Subject to change
+                    CPRINT(f"{k} = {w}", [0x09, 0x00])
+                continue
+            CPRINT(f"{command[1]}: {os.environ.get(command[1], None)}", [0x06, 0x00])
+        elif command[0] == "ginf":
+            if command[1] in kernel.GROUPS:
+                pass
+            else:
+                CPRINT("Group not found", [0x0c, 0x00])
+                continue
+            print(f"Group information for {command[1]}:")
+            a = 0
+            for group in kernel.GROUPSCLS:
+                if command[1] == group[0]:
+                    print(f"Group name  : {group[0]}")
+                    print(f"Permissions : {group[1].perms}")
+                    print(f"Group type  : {group[1].grouptype}")
+                    a = 1
+                    break
+            if a == 0:
+                CPRINT("Group not found", [0x0c, 0x00])
+        elif command[0] == "swu":
+            UserHandle = GetCurrentUser(command[1])
+            if UserHandle is None: continue
+            CPRINT("Please type the password of the target user (won't be echoed): ", [0x0e, 0x00])
+            up = kernel.stdio.ReadLineNE()
+            if kernel.usec.PasswordRead(up, UserHandle):
+                SetCurrentUserContext(UserHandle)
+                CPRINT("Switched user successfully", [0x09, 0x00])
+            else:
+                CPRINT(f"Invalid password for user {UserHandle.name}.", [0x0c, 0x00])
+        elif command[0] == "user":
+            if command[1] == "--New" or command[1] == "-c":
+                NewUserName = command[2]
+                NewUserPassword = command[3]
+                NewUserGroup = command[4]
+                found = 0
+                for group in kernel.GROUPSCLS:
+                    if NewUserGroup == group[0]:
+                        NewUserGroup = group[1]
+                        found = 1
+                        break
+                if found != 0:
+                    CPRINT("Unknown group", [0x0c, 0x00])
+                NewUser = User(NewUserName, NewUserGroup, NewUserPassword.encode(), [])
+                users["users"][len(users["users"])] = NewUser
+                save(users, ".\\users.db")
+            elif command[1] == "--List" or command[1] == "-l":
+                CPRINT("Users available:", [0x06, 0x00])
+                for user in users["users"]:
+                    if activeusername == users["users"][user].name:
+                        if users["users"][user].name == "root":
+                            CPRINT(users["users"][user].name + " [Logged in]", [0x0c, 0x00])
+                        else:
+                            print(users["users"][user].name + " [Logged in]")
+                    else:
+                        print(users["users"][user].name)
+        elif command[0] == "passwd":
+            if len(command) == 2:
+                with open(".\\users.db", "rb") as FH:
+                    UserRegistry: list | dict = pickle.load(FH)
+                    users = UserRegistry
+                UserHandle = GetHookOfCurrentUser()
+                CPRINT("Please type in your current password (won't be echoed): ", [0x0e, 0x00])
+                np = kernel.stdio.ReadLineNE()
+                Handle = GetHookOfCurrentUser()
+                if Handle[0] is None:
+                    CPRINT("The current user or does not exist or is invalid.", [0x0c, 0x00])
+                    continue
+                if Handle[1] is None:
+                    CPRINT("The current user or does not exist or is invalid.", [0x0c, 0x00])
+                    continue
+                if kernel.usec.PasswordRead(np, Handle[1]):
+                    CPRINT("Password set.", [0x0e, 0x00])
+                    for obj in users["users"]:
+                        tuser = users["users"][obj]
+                        if tuser.name == Handle[0]:
+                            HashedPass = kcrypto.Crypto.hash("sha256", command[1].encode())
+                            tuser.salt = kcrypto.Crypto.generate_salt(16)
+                            tuser.password = kcrypto.Crypto.salt(tuser.salt, HashedPass)
+                            break
+                    save(users, ".\\users.db")  # Would be funny to not save at that point, no?
+                else:
+                    CPRINT("Password is invalid.", [0x0c, 0x00])
+            else:
+                print("Usage: passwd [new_password]")
         elif command[0] == "echo":
             print(command[1])
         elif command[0] == "ls":
+            ShowHidden = None
+            if len(command) == 2:
+                if command[1] == "--Force" or command[1] == "-f":
+                    ShowHidden = True
+                else:
+                    ShowHidden = False
+            else:
+                ShowHidden = False
             for item in kernel.FileSystem.ListDir(".\\"):
                 if kernel.IsDir(".\\" + item):
-                    CPRINT(f"[{item}]", [0x0e, 0x00])
-                else:
-                    print(item)
+                    if ShowHidden and item.startswith("."):
+                        CPRINT(f"[{item}]", [0x0e, 0x00])
+                    if not item.startswith("."):
+                        CPRINT(f"[{item}]", [0x0e, 0x00])
+            for item in kernel.FileSystem.ListDir(".\\"):
+                if not kernel.IsDir(".\\" + item):
+                    if item.endswith(".kx") or item.endswith(".kxa"):
+                        CPRINT(f"{item}", [0x09, 0x00])
+                    elif item.endswith(".py"):
+                        CPRINT(f"{item}", [0x0a, 0x00])
+            for item in kernel.FileSystem.ListDir(".\\"):
+                if not kernel.IsDir(item):
+                    if not item.endswith(".kx") and not item.endswith(".kxa") and not item.endswith(".py"):
+                        print(item)
         elif command[0] == "clear":
             os.system("cls")
         elif command[0] == "cd":
@@ -141,15 +350,29 @@ while True:
             kernel.FileSystem.CreateDirectory(command[1])
         elif command[0].endswith(".kx"):
             try:
-                application.execute_app(command[0])
+                UserHandle = GetUserHandleOfActiveUserName(activeusername)
+                if UserHandle is None:
+                    CPRINT("Current user does not exists or is invalid", [0x0c, 0x00])
+                    continue
+                success = application.execute_app(f".\\sbin\\{command[0]}.kxa",
+                                                  UserHandle.group.perms + UserHandle.addedperms,
+                                                  UserHandle.group.grouptype)
+                if isinstance(success, list) and success[0] == "REJECT":
+                    CPRINT(f"Permission denied.\nReason: {success[1]}", [0x0c, 0x00])
+                continue
             except FileNotFoundError:
                 CPRINT("File not found.", [0x0c, 0x00])
         elif command[0].endswith(".kxa"):
             try:
-                with open(command[0], "rb") as FH:
-                    app = pickle.load(FH)
-                appcode = marshal.loads(app["_text_"])
-                exec(appcode["code"])
+                UserHandle = GetUserHandleOfActiveUserName(activeusername)
+                if UserHandle is None:
+                    CPRINT("Current user does not exists or is invalid", [0x0c, 0x00])
+                    continue
+                success = execute_app(f".\\sbin\\{command[0]}.kxa", UserHandle.group.perms + UserHandle.addedperms,
+                                      UserHandle.group.grouptype)
+                if isinstance(success, list) and success[0] == "REJECT":
+                    CPRINT(f"Permission denied.\nReason: {success[1]}", [0x0c, 0x00])
+                continue
             except FileNotFoundError:
                 CPRINT("File not found.", [0x0c, 0x00])
         elif command[0] == "mkdcd":
@@ -162,6 +385,12 @@ while True:
         elif command[0] == "rm":
             try:
                 if command[1].endswith(".py"):
+                    if "DELETE" in GetCurrentUser(activeusername).group.perms or "*" in GetCurrentUser(activeusername).group.perms or GetCurrentUser(
+                            activeusername) in GetCurrentUser(activeusername).addedperms:
+                        pass
+                    else:
+                        CPRINT("Permission denied.", [0x0c, 0x00])
+                        continue
                     CPRINT(f"[Delete]: {command[1]} is a system file, do you want to really delete it? (Y/n)",
                            [0x0e, 0x00])
                     CPRINT("It might make the system nonfunctional.", [0x04, 0x00])
@@ -174,11 +403,17 @@ while True:
                             break
                         CPRINT(f"Invalid choice: {yn}.", [0x0c, 0x00])
                 elif command[1].endswith(".kx"):
+                    if "DELETE" in GetCurrentUser(activeusername).group.perms or "*" in GetCurrentUser(activeusername).group.perms or GetCurrentUser(
+                            activeusername) in GetCurrentUser(activeusername).addedperms:
+                        pass
+                    else:
+                        CPRINT("Permission denied.", [0x0c, 0x00])
+                        continue
                     CPRINT(f"[Delete]: {command[1]} is an application, do you want to really delete it? (Y/n)",
                            [0x0e, 0x00])
-                    CPRINT("You will need to reinstall it later.", [0x04, 0x00])
+                    CPRINT('You will need to reinstall it later.', [0x04, 0x00])
                     while True:
-                        yn = input("(Y/n)? ")
+                        yn = input('(Y/n)? ')
                         if yn.lower() == "y":
                             kernel.FileSystem.DeleteAny(command[1])
                             break
@@ -227,6 +462,17 @@ while True:
                         if element.endswith(".log"):
                             #print(element)
                             kernel.FileSystem.DeleteAny(element)
+        elif command[0] == "cwu":
+            if len(command) == 2:
+                if command[1] == "-i":
+                    UserHandle = GetUserHandleOfActiveUserName(activeusername)
+                    if UserHandle == None:
+                        CPRINT("User does not exists or is invalid.", [0x0c, 0x00])
+                    CPRINT(f"Information for user {activeusername}:", [0x09, 0x00])
+                    print(f"Group: {UserHandle.group.groupname}")
+                    print(f"Created on: {UserHandle.created}")
+                    continue
+            print(activeusername)
         elif command[0] == "read":
             if len(command) == 2:
                 rs = pathlib.Path(command[1]).exists()

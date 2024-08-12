@@ -1,3 +1,9 @@
+import ast
+import pickle
+
+import klib.filewriter
+
+
 class Database:
     def __init__(self, maincol: str):
         self.__db__ = {maincol: {}}
@@ -16,6 +22,14 @@ class Database:
     def delete(self, item: str):
         del self.__db__[self.__selected__][item]
 
+    def save(self, db_target: str = ".\\MyDatabase.db"):
+        with klib.filewriter.DatabaseWriter(db_target) as fhdb:
+            klib.filewriter.WriteDB(self.__db__, fhdb)
+
+    def load(self, db_from: str = ".\\MyDatabase.db"):
+        with open(db_from, "rb") as FH:
+            self.__db__ = pickle.load(FH)
+
     def __setitem__(self, key, value):
         self.__db__[self.__selected__][key] = value
 
@@ -32,8 +46,11 @@ if __name__ == '__main__':
     db.new_column("main2"); db["test"] = "abcdefgh"
     db.select("main")
     db["test"] = "hgfedcba"
+    db.save()
     print(db())
     db.delete("test")
     print(db())
     db.delete_column("main")
+    print(db())
+    db.load()
     print(db())
